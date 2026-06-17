@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Tesztek
+.pytest_cache/
+
+# Claude Code
+.claude/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Lokális beállítások (az .example.ini kerül ki, a valódi nem)
+hp3458a_tool.ini
+
+# Dump mentések és logok (gépenként különbözők)
+dumps/
+
+# Windows
+Thumbs.db
+desktop.ini
