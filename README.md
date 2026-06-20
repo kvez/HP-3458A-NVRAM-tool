@@ -53,10 +53,10 @@ Requirements: Python 3.8+, tkinter (built-in). For NI-488.2 direct mode: NI-VISA
 
 **Supported GPIB connections:**
 
-| Mode | Hardware needed |
+| Mode | How to connect |
 |---|---|
-| **TCP Bridge** | Any Prologix-compatible GPIB adapter (GPIB-ETHERNET or GPIB-USB) with a TCP bridge running on the same network — see [GPIB-TCP-IP-bridge](https://github.com/kvez/GPIB-TCP-IP-bridge) |
-| **Direct NI-488.2** | NI GPIB-USB-HS (or any NI GPIB adapter) connected to the PC running this tool |
+| **TCP Bridge** | Connect via Prologix GPIB-ETHERNET protocol over the network. Works with a Prologix hardware adapter, or with an NI GPIB adapter running [GPIB-TCP-IP-bridge](https://github.com/kvez/GPIB-TCP-IP-bridge) — a companion app that exposes any NI GPIB adapter as a Prologix-compatible TCP endpoint. |
+| **Direct NI-488.2** | NI GPIB-USB-HS (or any NI GPIB adapter) connected directly to the PC running this tool, using the NI-488.2 driver. |
 
 ---
 
