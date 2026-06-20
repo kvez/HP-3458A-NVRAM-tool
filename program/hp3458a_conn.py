@@ -22,9 +22,10 @@ class TCPConn(BaseConn):
         self._s = socket.create_connection((host, port), timeout=tmo)
         self._buf = b''
         for cmd in ['++mode 1', f'++addr {gpib_addr}', '++auto 0',
-                    '++eos 2', '++eoi 1', '++read_tmo_ms 300']:
+                    '++eos 2', '++eoi 1', '++read_tmo_ms 2000', '++ifc']:
             self._s.sendall((cmd + '\n').encode())
             time.sleep(0.05)
+        time.sleep(0.15)
 
     def _raw(self, cmd: str):
         self._s.sendall((cmd.rstrip('\n') + '\n').encode())
@@ -46,9 +47,16 @@ class TCPConn(BaseConn):
     def gpib_clear(self):
         """GPIB Selected Device Clear (SDC) — Prologix ++clr parancs.
         Törli a műszer GPIB input/output bufferét. Stuck/teli buffer esetén.
+        SDC a HP 3458A END módját END OFF-ra reseti (power-on default) —
+        ezért END ALWAYS visszaállítása kötelező utána, különben az ibrd
+        soha nem kap EOI jelet és 1MB null byte-ot olvas (buffer-telt).
         """
         self._raw('++clr')
-        time.sleep(1.0)
+        time.sleep(1.5)
+        self._raw('TARM HOLD')
+        time.sleep(0.15)
+        self._raw('END ALWAYS')
+        time.sleep(0.1)
 
     def send(self, cmd: str):
         self._raw(cmd)
@@ -57,7 +65,9 @@ class TCPConn(BaseConn):
     def query(self, cmd: str, tmo: float = 5.0) -> str:
         self._raw(cmd)
         time.sleep(0.05)
-        self._raw('++read eoi')
+        self._raw('++ifc')
+        time.sleep(0.15)
+        self._raw('++read 10')
         return self._readline(tmo)
 
     def close(self):
@@ -112,10 +122,18 @@ class NIConn(BaseConn):
             ('ibrd',  ctypes.c_int, [ctypes.c_int, ctypes.c_char_p, ctypes.c_long]),
             ('ibclr', ctypes.c_int, [ctypes.c_int]),
             ('ibonl', ctypes.c_int, [ctypes.c_int, ctypes.c_int]),
-            ('ibtmo', ctypes.c_int, [ctypes.c_int, ctypes.c_int]),
         ]:
             getattr(lib, name).restype  = ret
             getattr(lib, name).argtypes = args
+
+        # ibtmo régebbi DLL-ekben elérhető, de ni4882.dll újabb verzióiban nincs exportálva.
+        self._ibtmo = None
+        try:
+            lib.ibtmo.restype  = ctypes.c_int
+            lib.ibtmo.argtypes = [ctypes.c_int, ctypes.c_int]
+            self._ibtmo = lib.ibtmo
+        except AttributeError:
+            pass
 
         ud = lib.ibdev(board, gpib_addr, 0, tmo, 1, 0)
         if ud < 0:
@@ -138,10 +156,8 @@ class NIConn(BaseConn):
         time.sleep(0.1)
 
     def query(self, cmd: str, tmo: float = 5.0) -> str:
-        # Korábban a tmo paramétert NEM vettük figyelembe — minden olvasás
-        # az ibdev()-nél beállított fix timeout-tal futott. Most minden
-        # query() előtt frissítjük a driver timeout-ját a kért értékre.
-        self._lib.ibtmo(self._ud, _tmo_code(tmo))
+        if self._ibtmo is not None:
+            self._ibtmo(self._ud, _tmo_code(tmo))
         self.send(cmd)
         buf = ctypes.create_string_buffer(8192)
         st = self._lib.ibrd(self._ud, buf, 8192)

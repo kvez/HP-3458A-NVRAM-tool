@@ -6,11 +6,15 @@
 
 ---
 
+![HP 3458A NVRAM Tool](picture.png)
+
+---
+
 ## What is this?
 
 The HP 3458A stores all calibration constants (zero offsets, gain values, DAC trims, ACAL results) in a battery-backed NVRAM chip (DS1220Y). This area is normally write-protected at the hardware level — the chip's `/WE` line is behind an I/O latch that cannot be reached directly over GPIB.
 
-This tool bypasses that protection by triggering the instrument's own **Level 7 NMI firmware routine** via a GPIB JSR backdoor combined with 68000 machine code injected into Settings RAM. The approach was discovered through full firmware reverse engineering of the HP 3458A REV9 ROM. See [`research/`](research/) for the complete analysis.
+This tool bypasses that protection by triggering the instrument's own **Level 7 NMI firmware routine** via a GPIB JSR backdoor combined with 68000 machine code injected into Settings RAM.
 
 **Supported operations:**
 - Cal_RAM dump (3-pass read with MD5 verification)
@@ -87,7 +91,7 @@ If you edited any field inside a checksum region, click **Recalculate Checksum**
 
 ## How it works (technical summary)
 
-The DS1220Y Cal_RAM chip's `/WE` line is controlled by an I/O latch that is not memory-mapped — it can only be driven by specific firmware routines. Through disassembly of the REV9 ROM, we identified the **Level 7 NMI handler** as the only routine that opens the `/WE` window.
+The DS1220Y Cal_RAM chip's `/WE` line is controlled by an I/O latch that is not memory-mapped — it can only be driven by specific firmware routines. The **Level 7 NMI handler** is the only routine that opens the `/WE` window.
 
 The write sequence:
 1. Machine code is injected into the Settings RAM (DS1235, writable over GPIB via `MWRITE`)
@@ -104,8 +108,6 @@ The write sequence:
 | Folder | Contents |
 |---|---|
 | [`program/`](program/) | The tool itself: tkinter GUI and backend modules, hardware-tested |
-| [`research/`](research/) | Scripts and outputs from the reverse engineering process — shows HOW the solution was found |
-| [`external_sources/`](external_sources/) | Raw ROM dumps read from the instrument's firmware chips — the starting point of analysis |
 | [`failed_attempts/`](failed_attempts/) | Cal_RAM write approaches that were tried and didn't work, documented to prevent re-investigation |
 
 ---
@@ -123,5 +125,3 @@ Compatibility with other firmware revisions is untested. The NMI mechanism and m
 ## License
 
 MIT License — see [LICENSE](LICENSE).
-
-The ROM dumps in `external_sources/` are read from a physical instrument owned by the author and are provided for research and interoperability purposes.

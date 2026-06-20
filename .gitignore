@@ -20,6 +20,10 @@ hp3458a_tool.ini
 # Dump mentések és logok (gépenként különbözők)
 dumps/
 
+# Kutatási anyagok és ROM dump-ok (nem publikus)
+research/
+external_sources/
+
 # Windows
 Thumbs.db
 desktop.ini

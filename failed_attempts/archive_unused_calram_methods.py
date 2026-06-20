@@ -1,8 +1,8 @@
 """ARCHÍV — nem használt / nem bizonyítottan működő cal_ram írási metódusok.
 
-Ezeket a `HP3458A` osztály metódusait 2026-06-16-án vettük ki a production
-`hp3458a_instr.py`-ból, mert vagy soha nem voltak GUI-gombhoz kötve, vagy a
-gomb most már egy másik, bizonyítottan biztonságos mechanizmust hív.
+A `HP3458A` osztály alábbi metódusai 2026-06-16-án kerültek eltávolításra
+a production `hp3458a_instr.py`-ból: GUI-gombhoz nem kötöttek, vagy a gomb
+már biztonságosabb mechanizmust hív.
 
 KÖZÖS GYÖKÉROK, amiért ezek mind kockázatosak: a `_write_loop_callback()`
 a Level7 NMI handler ÁLTAL HÍVOTT callback-en belül futtat egy DBRA-ciklust,
@@ -14,10 +14,8 @@ működő metódusok (`write_calram_word`, `write_calram_words_list`,
 forrás-RAM-ot a callbacken belül — az adat mindig D2-ben van már, mielőtt
 az NMI elsül.
 
-Ha ezek közül bármelyikre a jövőben mégis szükség lenne (pl. egy "folytasd
-a blokkos feltöltést onnan, ahol elakadt" funkció), újra kell írni a
-biztonságos (single-word callback + főkódban futó, számolt displacement-ű)
-mintára — NE ezt a fájlt élesítsd vissza változatlanul.
+Újraimplementálandó a biztonságos mintára (single-word callback, főkódban
+futó, számolt displacement). Ez az archív változatlanul nem élesíthető.
 
 ---
 
@@ -304,17 +302,12 @@ def write_calram_bin_chunked(self, data: bytes, chunk_size: int = 32,
 
 ## retry_calram_bulk_jsr() — JSR-újrapróbálás meglévő staginggel
 
-2026-06-16: a GUI "JSR Újrapróbálás" gombja törölve. Az eredeti szándék
-("ha a staging sikerült, de a JSR hibázott, ne kelljen újra a lassú
-staginget végigvárni") továbbra is hasznos lehet, de ez az implementáció
-a régi, egy-darab 1024-szavas `_write_loop_callback()` mechanizmust
-futtatja — NEM ugyanazt, mint amit a javított `write_calram_bin_fast()`
-valójában használ (128-szavas blokkok, számolt DBRA displacement). Ha
-"retry"-ként hívnád a write_calram_bin_fast egy hibázott blokkja után, egy
-teljesen más, kockázatosabb útvonalat futtatna le, mint ami a staginget
-végezte — nem koherens. Ha ÚJRA kell egy ilyen funkció, a write_calram_bin_fast
-blokkos mechanizmusára épülve kell megírni (folytatás egy adott start_word-től),
-nem ezt felélesztve.
+2026-06-16: GUI "JSR Újrapróbálás" gomb eltávolítva. Az implementáció a
+régi, egydarab 1024-szavas `_write_loop_callback()` mechanizmust használja
+— nem kompatibilis a `write_calram_bin_fast()` 128-szavas blokkos, számolt
+displacement-ű mintájával; retry-ként inkoherens lenne. Esetleges
+újraimplementálás alapja: `write_calram_bin_fast` blokkos mechanizmusa
+(folytatás adott `start_word`-től).
 
 ```python
 def retry_calram_bulk_jsr(self, progress_cb=None) -> bool:
@@ -387,11 +380,8 @@ def _write_loop_callback(self):
     ])
 ```
 
-**Megjegyzés (2026-06-16 felfedezés):** ennek a callbacknek a DBRA
-displacementje ÖNMAGÁBAN is hibás (-12 helyett -10 (0xFFF6) kellene a
-loop_start(byte0)/dbra_opcode(byte8) alapján) — ugyanaz a hibaosztály,
-mint amit a `write_calram_bin_fast`-ban javítottunk. Mivel ez a callback
-így is, úgy is archiválásra kerül (a /WE-alatti RAM-olvasás miatt), a
-displacement bugot NEM javítottuk ki — csak dokumentáljuk, hogy ha valaha
-ezt a mintát felélesztenéd, ez is hibás.
+**Hibás DBRA displacement (2026-06-16):** -12 helyett -10 (0xFFF6) kellene
+(loop_start=byte0, dbra_opcode=byte8) — ugyanaz a hibaosztály, mint a
+`write_calram_bin_fast`-ban javított bug. Nem javítva.
+Megpróbált hibás megközelítés dokumentációja.
 """
