@@ -78,8 +78,15 @@ Double-click any field in the list to edit its value. Fields are decoded as IEEE
 
 ### 4. Upload to instrument
 
-- **Fast block mode** (recommended for most cases) — uploads in blocks, takes a few minutes
-- **Word-by-word safe mode** — uploads one word at a time, takes ~1 hour, most conservative
+Three upload modes are available:
+
+| Button | What it does | When to use |
+|---|---|---|
+| **Upload to meter** | Uploads the full Cal_RAM in fast block mode | Default choice; takes a few minutes |
+| **Changed words only** | Uploads only the words that differ from the original dump | Fastest option when only a few fields were edited |
+| **Word-by-word upload (~1 hour)** | Uploads one word at a time using the safest mechanism | If block mode fails or for maximum caution |
+
+Before uploading, the tool shows a summary of which fields changed so you can review the edits.
 
 After uploading, always run **Verify** to confirm the instrument received the correct data.
 
