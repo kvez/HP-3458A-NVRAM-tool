@@ -55,7 +55,7 @@ Requirements: Python 3.8+, tkinter (built-in). For NI-488.2 direct mode: NI-VISA
 
 | Mode | Hardware needed |
 |---|---|
-| **TCP Bridge (Prologix)** | Prologix GPIB-ETHERNET or GPIB-USB + TCP bridge script running on a PC on the same network |
+| **TCP Bridge** | Any Prologix-compatible GPIB adapter (GPIB-ETHERNET or GPIB-USB) with a TCP bridge running on the same network — see [GPIB-TCP-IP-bridge](https://github.com/kvez/GPIB-TCP-IP-bridge) |
 | **Direct NI-488.2** | NI GPIB-USB-HS (or any NI GPIB adapter) connected to the PC running this tool |
 
 ---
