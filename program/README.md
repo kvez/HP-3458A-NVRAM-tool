@@ -10,6 +10,7 @@ A HP 3458A NVRAM Programozó éles tkinter GUI-ja és backend moduljai.
 | `hp3458a_instr.py` | GPIB parancsok: MREAD/MWRITE/JSR, Cal_RAM olvasás/írás/verify (Level7 NMI mechanizmuson keresztül), Settings_RAM dump. |
 | `hp3458a_calram.py` | Cal_RAM codec — mező olvasás/írás, checksum, diff, riport generálás. |
 | `hp3458a_calram_decoder.py` | A Cal_RAM mezőtáblája (200+ kalibrációs mező offset/típus/név szerint). |
+| `hp3458a_cal_limits.py` | A Cal_RAM kézi módosítás határértékei. |
 | `hp3458a_conn.py` | Kapcsolat réteg — TCP (Prologix GPIB-ETHERNET bridge) vagy NI-488.2 DLL közvetlen. |
 | `hp3458a_tool.ini` | Mentett kapcsolódási beállítások (host/port/GPIB cím) — automatikusan létrejön első csatlakozáskor. |
 | `tests/test_calram.py` | Pytest unit tesztek — hardver nélkül futtatható (checksum, diff, mező validáció). |
@@ -36,8 +37,9 @@ python hp3458a_gui.py
 2. Cal_RAM tab → **Dump (letöltés)** — 3 menetes, MD5 ellenőrzéssel
 3. Mező szerkesztése dupla kattintással a listában
 4. **Checksum újraszámítás** (ha checksum tartományban módosítottál)
-5. **Feltöltés műszerre** (gyors blokkos mód) vagy **Szavankénti feltöltés (~1 óra)** (legbiztonságosabb)
-6. **Verify (visszaolvasás)** — kötelező lépés
+5. **NMI Teszt** — feltöltés előtt sikeres teszt szükséges
+6. **Feltöltés műszerre** (gyors blokkos mód) vagy **Szavankénti feltöltés (~1 óra)** (legbiztonságosabb)
+7. **Verify (visszaolvasás)** — kötelező lépés
 
 ## Tesztek futtatása
 
