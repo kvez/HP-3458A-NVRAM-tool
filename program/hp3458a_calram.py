@@ -1,6 +1,7 @@
 """HP 3458A cal_ram codec — olvas, ír, checksum, riport.
 Importálja a FIELDS listát a meglévő hp3458a_calram_decoder.py-ból.
 """
+import math
 import struct
 import hashlib
 from pathlib import Path
@@ -13,23 +14,12 @@ try:
 except ImportError:
     raise ImportError('hp3458a_calram_decoder.py nem található a program mappájában')
 
-# Checksum definíciók: (mező_neve, offset, [(tartomány_start, tartomány_end_exclusive), ...])
+# Checksum definíciók: (mező_neve, offset, [(tartomány_start, tartomány_vég_kizárt), ...])
 #
-# 2026-06-16: a korábbi "egy tartomány + fix seed" modellt ELVETETTÜK — 6
-# független dumpon (2 saját friss, 2 régebbi saját-szerű, 2 VALÓDI külső/régi
-# műszer dumpja) tesztelve csak 2/6-on egyezett (lásd
-# research/python/verify_checksum_hypothesis.py és research/dumps/cs.txt).
-# Még a saját, friss műszerdump is hibásnak látszott vele — a régi képlet
-# csak 2 konkrét, egymással rokon dumpra volt illesztve, nem általános.
-#
-# A helyes modell (cs.txt hipotézis, megerősítve): TÖBB tartomány összege +
-# egy "flag_count" maradék, amit minden BETÖLTÖTT dumpból külön kell
-# visszafejteni (lásd CalRAMCodec.__init__ / _derive_flag_counts), NEM egy
-# globális konstans. CS0/CS2 flag_count tökéletesen stabil volt mind a 6
-# dumpon (56 / 11), CS1/CS3 5/6-on (187 / 3) — ez utóbbi kettő valószínűleg
-# egy firmware-revíziónként vagy biztonsági-állapotonként változó flag-bitet
-# tartalmaz, ezért MINDIG a betöltött dump saját értékét kell megőrizni,
-# nem feltételezni egy univerzális konstanst.
+# Helyes modell: Cal_Sum = több tartomány összege + dump-specifikus flag_count.
+# A flag_count értéke dumpönként eltérhet, ezért CalRAMCodec.__init__ minden
+# betöltött dumpból visszafejti és megőrzi (_derive_flag_counts) — nem
+# feltételezhető globális konstansnak.
 CAL_SUM_DEFS = [
     ('Cal_Sum0', 0x1BC, [(0x000, 0x040), (0x060, 0x1BC)]),
     ('Cal_Sum1', 0x59C, [(0x040, 0x060), (0x1C0, 0x59C)]),
@@ -41,24 +31,19 @@ CAL_SUM_DEFS = [
 OUTSIDE_CHECKSUM = {0x626, 0x62A}  # Destructive Overloads, Defeats
 
 
-def _range_sum(data: bytes, ranges) -> int:
+def _range_sum(data: bytes | bytearray, ranges) -> int:
     total = 0
     for start, end in ranges:
         total += sum(data[start:end])
     return total & 0xFFFF
 
 
-def _compute_checksum(data: bytes, ranges, flag_count: int) -> int:
-    """Cal_Sum = (több tartomány összege + flag_count) & 0xFFFF.
-
-    A flag_count NEM globális konstans — minden dumpból a betöltéskor kell
-    visszafejteni (stored - rangesum), és megőrizni a módosítások során.
-    Lásd a CAL_SUM_DEFS feletti megjegyzést.
-    """
+def _compute_checksum(data: bytes | bytearray, ranges, flag_count: int) -> int:
+    """Cal_Sum = (több tartomány összege + flag_count) & 0xFFFF."""
     return (_range_sum(data, ranges) + flag_count) & 0xFFFF
 
 
-def _read_field(data: bytes, offset: int, typ: str):
+def _read_field(data: bytes | bytearray, offset: int, typ: str):
     sz = TYPE_SIZE[typ]
     if offset + sz > len(data):
         return None
@@ -79,6 +64,8 @@ def _write_field(data: bytearray, offset: int, typ: str, value) -> str:
     try:
         if typ == 'dbl':
             v = float(value)
+            if not math.isfinite(v):
+                return 'Az értéknek véges számnak kell lennie (nan/inf nem megengedett)'
             struct.pack_into('>d', data, offset, v)
         elif typ == 'i32':
             v = int(value, 0) if isinstance(value, str) else int(value)
@@ -101,11 +88,11 @@ def _write_field(data: bytearray, offset: int, typ: str, value) -> str:
                 return 'Tartomány: 0 .. 255'
             data[offset] = v
         elif typ == 'str':
-            s = str(value)[:80]
+            s = str(value)[:sz]
             bad = [c for c in s if not (32 <= ord(c) <= 126)]
             if bad:
                 return f'Csak ASCII 32-126 (rossz: {bad[:5]})'
-            enc = s.encode('ascii').ljust(80, b'\x00')
+            enc = s.encode('ascii').ljust(sz, b'\x00')
             data[offset:offset + sz] = enc
     except (ValueError, struct.error) as exc:
         return f'Formátum hiba: {exc}'
@@ -141,14 +128,12 @@ class CalRAMCodec:
 
     @staticmethod
     def _derive_flag_counts(data: bytes) -> dict:
-        """flag_count = stored_checksum - rangesum, EBBŐL a (még módosítatlan)
-        dumpból visszafejtve — lásd a CAL_SUM_DEFS feletti megjegyzést.
-        Ezt kell megőrizni minden további újraszámításnál, NEM egy globális
-        konstanst feltételezni.
+        """flag_count = stored_checksum - rangesum, visszafejtve a módosítatlan dumpból.
+        Minden újraszámításnál ezt az értéket kell megőrizni — nem feltételezhető globális konstans.
         """
         out = {}
         for name, off, ranges in CAL_SUM_DEFS:
-            stored = _read_field(data, off, 'u16') or 0
+            stored = int(_read_field(data, off, 'u16') or 0)
             out[name] = (stored - _range_sum(data, ranges)) & 0xFFFF
         return out
 
@@ -219,15 +204,26 @@ class CalRAMCodec:
                 return _write_field(tmp, off, typ, str_value)
         return f'Ismeretlen mező: {name}'
 
+    def get_field_limits(self, name: str) -> tuple[float | None, float | None]:
+        """(also, felso) limitet ad vissza, vagy (None, None) ha nincs."""
+        from hp3458a_cal_limits import CAL_LIMITS
+        for off, typ, n in FIELDS:
+            if n == name:
+                if typ != 'dbl':
+                    return None, None
+                result = CAL_LIMITS.get(off)
+                if result is None:
+                    return None, None
+                return result
+        return None, None
+
     # ── Checksum ─────────────────────────────────────────────────────────────
 
     def verify_checksums(self) -> list:
         """Visszaadja: [(név, offset, tárolt, számított, ok), ...]
 
-        A "számított" érték a betöltéskor (vagy utolsó reset_original()-kor)
-        rögzített flag_count-tal készül, NEM globális konstanssal — ezért ha
-        a checksum tartományon belül módosítottál egy mezőt, de még nem
-        számoltál újra, itt eltérést fogsz látni (ez a helyes, várt jelzés).
+        A számítás a betöltéskori flag_count értékkel történik. Ha a checksum
+        tartomány módosult de a checksum még nem lett újraszámolva, eltérés látható.
         """
         d = bytes(self._data)
         out = []
@@ -238,10 +234,10 @@ class CalRAMCodec:
         return out
 
     def recalculate_checksums(self):
-        """A checksumokat a betöltéskor megőrzött flag_count-tal frissíti —
-        SOHA nem a jelenlegi (esetleg már módosított) adatból fejti vissza
-        újra a flag_count-ot, mert az tautologikusan mindig "helyesnek"
-        tüntetne fel bármilyen adatot."""
+        """Checksumokat újraszámol a betöltéskori flag_count értékkel.
+        A flag_count-ot nem fejti vissza újra a jelenlegi adatból — az mindig
+        a betöltéskori értéket őrzi, különben bármilyen adat helyesnek látszana.
+        """
         for name, off, ranges in CAL_SUM_DEFS:
             cs_val = _compute_checksum(self._data, ranges, self._flag_counts[name])
             struct.pack_into('>H', self._data, off, cs_val)

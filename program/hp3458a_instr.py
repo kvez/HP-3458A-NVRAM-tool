@@ -1,66 +1,97 @@
 """HP 3458A műszer parancsok — MREAD, MWRITE, JSR, dump, cal_ram írás, verify."""
 import time
-import threading
+from dataclasses import dataclass
 
-from hp3458a_conn import BaseConn, ConnError
+from hp3458a_conn import BaseConn
 
 CAL_RAM_BASE  = 0x60000
 CAL_RAM_SIZE  = 2048
 SETTINGS_BASE = 0x120000
 SETTINGS_SIZE = 0x10000  # 64KB
 
-# Settings_ram szabad területek az injektált kódhoz / adathoz
-# Megerősített szabad (null) zóna: 0x127196–0x12A885 (~14KB, dump alapján)
-CODE_BASE = 0x12A000   # ~64 byte főkód    (volt: 0x12E000 — calibráció cache)
-CB_BASE   = 0x12A100   # ~20 byte callback (volt: 0x12E100 — calibráció cache)
-DATA_BASE = 0x127200   # 2048 byte staging (volt: 0x12D000 — calibráció cache)
+# Settings RAM területek az injektált kód és staging adat számára.
+# Minden ismert firmware verzióban megerősítetten szabad zóna.
+CODE_BASE = 0x12A000   # ~64 szó főkód
+CB_BASE   = 0x12A100   # ~20 szó callback
+DATA_BASE = 0x127200   # 1024 szó staging
 
-# Level7 NMI magic word-ök (power cycle után 0x0000 → MWRITE-tal beállítandó)
-MAGIC_WORDS = [
-    (0x121780, 0xDEAF),
-    (0x120C90, 0xBAD1),
-    (0x121782, 0x0ACE),
-    (0x120C92, 0xBEAD),
-]
-
-# Level7 NMI handler settings_ram munkaterülete (lásd [[feedback-calram-we-mechanism]]).
-# Ezeket a címeket korábban literálként (0x0012, 0x1852 stb.) írtuk be minden
-# main_code listába külön-külön — most egy helyen vannak névvel ellátva.
-CALLBACK_PTR_ADDR = 0x121852   # NMI handler ide olvassa be a callback hívási cím-pointert (32-bit, 2 word)
-SUCCESS_FLAG_ADDR = 0x121856   # NMI handler 1-re írja siker esetén
-SAVED_SR_ADDR     = 0x121858   # TRAP#5 ISR ide menti az SR-t, NMI handler ezt állítja vissza
-WE_CLOSE_VAL_ADDR = 0x12185A   # /WE close érték (HIGH byte); | 0x80 = /WE open
 NMI_TRIGGER_PORT  = 0xC0001    # IO latch port; bit7 írása triggereli a Level7 NMI-t
 
 
-# Cal_RAM checksum szavak byte-offsetjei a cal_ram-ban.
-# 2026-06-16: ITT csak az OFFSETEK kellenek (melyik szavakat kell utoljára,
-# külön blokkban írni — lásd feedback_checksum_bypass: a pSOS háttér-
-# ellenőrzés miatt a checksum-szó és a hozzá tartozó adat egy chunkban
-# íródjon). A TÉNYLEGES checksum-érték már a `data`-ban helyesen ott van —
-# azt a GUI codec (hp3458a_calram.py) számolja a firmware-szerű, több
-# tartomány + dump-specifikus flag_count modellel (lásd cs.txt), NEM ez a
-# fájl. A korábbi itt élt fix seed-es újraszámítás KIVÉVE, mert csak 2 saját
-# dumpra illeszkedett — lásd research/python/verify_checksum_hypothesis.py.
+# ── Firmware verzió-specifikus konstansok ────────────────────────────────────
+
+@dataclass
+class FirmwareConfig:
+    """NMI mechanizmus Settings RAM-beli konstansai egy adott firmware verzióhoz.
+
+    Az NMI adatstruktúra belső elrendezése azonos minden verzióban:
+      callback_ptr_addr + 0 = callback pointer (32-bit)
+      callback_ptr_addr + 4 = success_flag
+      callback_ptr_addr + 6 = saved_sr
+      callback_ptr_addr + 8 = we_close_val
+    A magic word-pároknál DEAF+2=0ACE és BAD1+2=BEAD minden verzióban.
+    """
+    rev_major: int
+    callback_ptr_addr: int   # NMI struktúra báziscíme a Settings RAM-ban
+    magic_deaf_addr: int     # DEAF magic word cím (0ACE = +2)
+    magic_bad1_addr: int     # BAD1 magic word cím (BEAD = +2)
+
+    @property
+    def success_flag_addr(self):  return self.callback_ptr_addr + 4
+    @property
+    def saved_sr_addr(self):      return self.callback_ptr_addr + 6
+    @property
+    def we_close_val_addr(self):  return self.callback_ptr_addr + 8
+    @property
+    def magic_0ace_addr(self):    return self.magic_deaf_addr + 2
+    @property
+    def magic_bead_addr(self):    return self.magic_bad1_addr + 2
+    @property
+    def magic_words(self):
+        return [
+            (self.magic_deaf_addr, 0xDEAF),
+            (self.magic_bad1_addr, 0xBAD1),
+            (self.magic_0ace_addr, 0x0ACE),
+            (self.magic_bead_addr, 0xBEAD),
+        ]
+
+
+FIRMWARE_CONFIGS: dict[int, FirmwareConfig] = {
+    9: FirmwareConfig(9, 0x121852, 0x121780, 0x120C90),
+    8: FirmwareConfig(8, 0x121852, 0x121780, 0x120C90),
+    7: FirmwareConfig(7, 0x121852, 0x121780, 0x120C90),
+    6: FirmwareConfig(6, 0x121A4E, 0x12197C, 0x120C62),
+    5: FirmwareConfig(5, 0x121A4E, 0x12197C, 0x120C62),  # REV5.3 — azonos REV6
+    4: FirmwareConfig(4, 0x121A38, 0x12196E, 0x120C62),
+    3: FirmwareConfig(3, 0x1211E8, 0x120AFE, 0x1211FC),  # REV3 — azonos REV2
+    2: FirmwareConfig(2, 0x1211E8, 0x120AFE, 0x1211FC),
+}
+
+SUPPORTED_REVS = sorted(FIRMWARE_CONFIGS.keys())
+
+
+# Cal_RAM checksum szavak byte-offsetjei. A checksum szavakat a feltöltés
+# legvégén, a normál adatblokkokból elkülönítve kell írni — ezzel elkerülhető,
+# hogy részlegesen felírt adat mellé érvényes checksum kerüljön.
+# A checksum értékét a CalRAMCodec számítja (hp3458a_calram.py).
 _CAL_SUM_OFFSETS = [0x1BC, 0x59C, 0x5C8, 0x624]  # CS0, CS1, CS2, CS3
 
-# A pSOS felülírja e 3 staging word HIGH BYTE-ját a ~3 perces MWRITE alatt.
-# pSOS a PÁROS CÍM-re ír (DATA_BASE + pair_i*2 = HIGH byte pozíció):
-#   0x1275B2 = DATA_BASE+946  → cal_RAM[946] HIGH BYTE (pair 473)
-#   0x1275FA = DATA_BASE+1018 → cal_RAM[1018] HIGH BYTE (pair 509)
-#   0x1275FE = DATA_BASE+1022 → cal_RAM[1022] HIGH BYTE (pair 511)
-# Az érintett byte-ok a CS1 tartományban vannak (0x1BE-0x59B = 446-1435).
-# pair_i, pSOS által beírt HIGH byte érték, fizikai even cím
+# A DATA_BASE staging területen 3 pozíció HIGH byte-ját egy háttérfolyamat
+# felülírja a ~3 perces MWRITE alatt. Ezek a CS1 tartományba eső word-ök
+# (cal_ram[946], [1018], [1022]) — a feltöltés előtt a staging megfelelő
+# pozícióit a cal_ram tartalomból vissza kell állítani.
+# Elemek: (pair_i, felülírt_high_byte, fizikai_even_cím)
 _BULK_BUGGY_PAIRS = [
-    (473, 0x02, CAL_RAM_BASE + 473 * 4),   # cal_ram[946] HIGH BYTE → 0x02, phys=0x60764
-    (509, 0x02, CAL_RAM_BASE + 509 * 4),   # cal_ram[1018] HIGH BYTE → 0x02, phys=0x607F4
-    (511, 0x04, CAL_RAM_BASE + 511 * 4),   # cal_ram[1022] HIGH BYTE → 0x04, phys=0x607FC
+    (473, 0x02, CAL_RAM_BASE + 473 * 4),
+    (509, 0x02, CAL_RAM_BASE + 509 * 4),
+    (511, 0x04, CAL_RAM_BASE + 511 * 4),
 ]
 
 
 class HP3458A:
     def __init__(self, conn: BaseConn):
         self._conn = conn
+        self._cfg: FirmwareConfig = FIRMWARE_CONFIGS[9]  # alapértelmezett; init() frissíti
 
     # ── Alap kommunikáció ────────────────────────────────────────────────────
 
@@ -77,18 +108,12 @@ class HP3458A:
         self._conn.gpib_clear()
 
     def assert_instrument_present(self) -> str:
-        """SDC + ID? ellenőrzés — KÖTELEZŐ minden cal_ram írás ELEJÉN.
+        """SDC flush + ID? ellenőrzés minden cal_ram írás előtt.
 
-        2026-06-16 felfedezés: a szoftver korábban "sikeresnek" jelzett egy
-        teljes word-feltöltést úgy is, hogy a műszer KI volt kapcsolva, és
-        csak a GPIB bridge futott — a bridge/busz canned vagy lebegő
-        válaszokat adott, amiket a kód hibásan érvényes ERRSTR?="NO ERROR"
-        válasznak vett. Ez minden bizonnyal hozzájárult egy cal_ram
-        korrupcióhoz (RAM-teszt-szerű mintázat egy feltöltés után).
-
-        Ezért MINDEN írási útvonal elején SDC-t küldünk, és megköveteljük,
-        hogy az ID? válasz tartalmazza a "HP3458A" karakterláncot — csak
-        ekkor garantált, hogy egy valódi, válaszoló műszerrel beszélünk.
+        Egy GPIB bridge önmagában képes kielégítő választ adni (lebegő busz,
+        pufferelt válasz) akkor is, ha a műszer nincs bekapcsolva — ezért az
+        ERRSTR? 'NO ERROR' önmagában nem elegendő bizonyíték. Az ID? válaszban
+        kötelező a 'HP3458A' karakterlánc.
         """
         self._conn.gpib_clear()  # SDC: GPIB buffer flush
         resp = self.query('ID?', tmo=5.0)
@@ -100,6 +125,34 @@ class HP3458A:
             )
         return resp
 
+    @property
+    def fw_rev(self) -> int:
+        """Detektált firmware verzió főszáma (pl. 9 = REV9)."""
+        return self._cfg.rev_major
+
+    def detect_firmware_config(self) -> FirmwareConfig:
+        """REV? lekérdezés alapján visszaadja a verziófüggő konstansokat.
+
+        A firmware válasza: 'REV 9,0' (REV prefix + major,minor formátum).
+        Sikertelen lekérdezés vagy ismeretlen verzió esetén RuntimeError-t dob.
+        Eredmény self._cfg-be is kerül.
+        """
+        resp = self.query('REV?', tmo=5.0).strip()
+        try:
+            # 'REV 9,0', '9,0', 'REV 5,3', 'REV 5.3,0' mindkettőt kezeli
+            clean = resp.upper().replace('REV', '').strip()
+            major = int(float(clean.split(',')[0].strip()))
+        except (ValueError, IndexError):
+            raise RuntimeError(f'REV? érvénytelen válasz: {resp!r}')
+        cfg = FIRMWARE_CONFIGS.get(major)
+        if cfg is None:
+            raise RuntimeError(
+                f'Nem támogatott firmware verzió: REV {major}. '
+                f'Támogatott: REV {SUPPORTED_REVS}.'
+            )
+        self._cfg = cfg
+        return cfg
+
     def init(self):
         """Műszer-jelenlét ellenőrzés + alapállapot: PRESET NORM + END ALWAYS + BEEP 1."""
         self.assert_instrument_present()
@@ -109,6 +162,7 @@ class HP3458A:
         time.sleep(0.2)
         self.send('BEEP 1')    # KÖTELEZŐ az MREAD-hez!
         time.sleep(0.2)
+        self.detect_firmware_config()
         self.query('ERRSTR?')
 
     def test_id(self) -> str:
@@ -122,15 +176,19 @@ class HP3458A:
 
     def mread_word(self, phys: int, retries: int = 3) -> int:
         """MREAD decimális cím → 16-bit word. LOW byte = 0xB9 (lebegő busz a cal_ram-nál)."""
+        from hp3458a_conn import ConnError
         for attempt in range(retries):
             try:
-                r = self.query(f'MREAD {phys}', tmo=2.0)
-                return int(float(r)) & 0xFFFF
-            except Exception:
+                r = self.query(f'MREAD {phys}', tmo=2.0).strip()
+                v = int(r)
+                if not (-32768 <= v <= 32767):
+                    raise ValueError(f'MREAD válasz tartományon kívül: {v!r}')
+                return v & 0xFFFF
+            except (TimeoutError, ConnError):
                 if attempt == retries - 1:
                     raise
                 time.sleep(0.2)
-        return 0
+        raise RuntimeError('unreachable')
 
     def mread_hi(self, phys: int) -> int:
         """Cal_RAM byte olvasás: MREAD word HIGH byte = érvényes adat."""
@@ -173,48 +231,39 @@ class HP3458A:
 
     def _set_magic_words(self):
         """Level7 NMI biztonsági ellenőrzés: 4 magic word beállítása settings_ram-ba."""
-        for addr, val in MAGIC_WORDS:
+        for addr, val in self._cfg.magic_words:
             self.mwrite(addr, val)
 
     def _write_single_callback(self):
         """Callback: movep.w d2,$0(a0); rts  — 1 word (2 byte) ír cal_ram-ba."""
         self._mwrite_words(CB_BASE, [0x0588, 0x0000, 0x4E75])
 
-    @staticmethod
-    def _callback_setup_words() -> list:
-        """CB_BASE pointer beállítása + sikerjelző törlése — minden main_code eleji,
-        közös blokk. Korábban 3x duplikálva volt szó szerint (write_calram_word,
-        write_calram_words_list, run_block) — most egy helyen él."""
+    def _callback_setup_words(self) -> list:
+        """Közös JSR main_code prológ: CB_BASE betöltése callback_ptr-be, success_flag törlése."""
+        cfg = self._cfg
         return [
-            0x287C, (CB_BASE >> 16) & 0xFFFF, CB_BASE & 0xFFFF,                  # MOVEA.L #CB_BASE, A4
-            0x23CC, (CALLBACK_PTR_ADDR >> 16) & 0xFFFF, CALLBACK_PTR_ADDR & 0xFFFF,  # MOVE.L A4, callback_ptr
+            0x287C, (CB_BASE >> 16) & 0xFFFF, CB_BASE & 0xFFFF,                      # MOVEA.L #CB_BASE, A4
+            0x23CC, (cfg.callback_ptr_addr >> 16) & 0xFFFF, cfg.callback_ptr_addr & 0xFFFF,  # MOVE.L A4, callback_ptr
             0x33FC, 0x0000,
-            (SUCCESS_FLAG_ADDR >> 16) & 0xFFFF, SUCCESS_FLAG_ADDR & 0xFFFF,      # MOVE.W #0, success_flag
+            (cfg.success_flag_addr >> 16) & 0xFFFF, cfg.success_flag_addr & 0xFFFF,  # MOVE.W #0, success_flag
         ]
 
-    @staticmethod
-    def _nmi_trigger_words() -> list:
-        """A /WE nyitása + Level7 NMI trigger + timing wait — a tényleges
-        cal_ram írást elindító közös szósorozat. Korábban 3x duplikálva volt
-        szó szerint — most egy helyen él, lásd [[feedback-calram-we-mechanism]]
-        (IO latch propagation delay → timing wait KÖTELEZŐ a trigger után)."""
+    def _nmi_trigger_words(self) -> list:
+        """/WE nyitás + Level7 NMI trigger + timing wait a cal_ram íráshoz.
+        A timing wait az IO latch propagation delay miatt kötelező a trigger után."""
+        cfg = self._cfg
         return [
-            0x1C39, (WE_CLOSE_VAL_ADDR >> 16) & 0xFFFF, WE_CLOSE_VAL_ADDR & 0xFFFF,  # MOVE.B we_close, D6
-            0x0046, 0x0080,                                                          # ORI.W #$80, D6
-            0x13C6, (NMI_TRIGGER_PORT >> 16) & 0xFFFF, NMI_TRIGGER_PORT & 0xFFFF,    # MOVE.B D6, nmi_port
-            0x3C3C, 0x0009,                                                          # MOVE.W #9, D6
-            0x57CE, 0xFFFE,                                                          # DBEQ D6, *  (timing wait)
+            0x1C39, (cfg.we_close_val_addr >> 16) & 0xFFFF, cfg.we_close_val_addr & 0xFFFF,  # MOVE.B we_close, D6
+            0x0046, 0x0080,                                                                   # ORI.W #$80, D6
+            0x13C6, (NMI_TRIGGER_PORT >> 16) & 0xFFFF, NMI_TRIGGER_PORT & 0xFFFF,            # MOVE.B D6, nmi_port
+            0x3C3C, 0x0009,                                                                   # MOVE.W #9, D6
+            0x57CE, 0xFFFE,                                                                   # DBEQ D6, *  (timing wait)
         ]
 
     # ── Cal_RAM WRITE: egyszeri word ─────────────────────────────────────────
 
     def _write_calram_word_raw(self, phys: int, word: int) -> str:
-        """Egy cal_ram word írása NMI-vel; visszaadja a nyers ERRSTR? választ.
-
-        Közös implementáció write_calram_word() és write_calram_words_list()
-        alatt — ide kerül a TRAP#5 + D2 betöltés + a megosztott callback-setup
-        és NMI-trigger szekvencia. NE duplikáld ezt az opcode listát máshol.
-        """
+        """Egy cal_ram word NMI-vel való írása; visszatér a nyers ERRSTR? válasszal."""
         self._set_magic_words()
         self._write_single_callback()
         main_code = [
@@ -340,42 +389,16 @@ class HP3458A:
 
     def write_calram_bin_fast(self, data: bytes, progress_cb=None, stop_event=None,
                               block_words: int = 128) -> bool:
-        """Teljes cal_RAM feltöltés gyors, de blokkolt módban.
-
-        Alapértelmezés: 128 word / JSR-blokk.
-
-        Fontos pontosítás:
-          - 1 CAL word = 2 byte adat.
-          - 1 NMI / WE pulse továbbra is csak 1 wordöt ír.
-          - Egy JSR-en belül most legfeljebb 128 egymás utáni NMI trigger fut.
-          - Ez NEM a régi 1024 word / egyetlen JSR módszer.
-
-        Miért így?
-          A korábbi 1024 word / JSR túl hosszú volt: kb. 0x0230 CAL offsetig
-          jutott, majd a műszer kifagyott (ráadásul az a verzió egy hibás,
-          hardkódolt DBRA-displacementet is tartalmazott: -32 helyett -30
-          kellett volna, ami "114,'CPU EXCEPTION -- 4'" illegális utasítás
-          hibát okozott — lásd lent, a displacementet most már számoljuk).
-          A 128 wordes blokkolás nagyobb tartalékot ad, de megtartja a
-          gyors belső loop előnyét.
+        """Teljes cal_RAM feltöltés blokkos JSR módban (alapértelmezés: 128 word/blokk).
 
         Folyamat:
-          1. 1024 word MWRITE → DATA_BASE staging (/WE zárva)
-          2. pSOS-korrupt staging pozíciók javítása
-          3. checksumok kiszámítása és stagingbe írása
-          4. CAL RAM írás 128 wordes JSR-blokkokban
-          5. checksum wordök külön, a legvégén íródnak
+          1. 1024 word MWRITE → DATA_BASE staging
+          2. Háttérfolyamat által felülírt staging pozíciók korrekciója
+          3. CAL RAM írás legfeljebb block_words szavas JSR-blokkokban
+          4. Checksum szavak külön, a legvégén
 
-        Főkód blokkonként:
-          MOVE.W (A3)+, D2  → adat stagingből D2-be
-          NMI trigger       → callback: MOVEP.W D2,0(A0); RTS
-          ADDQ.L #4, A0
-          DBRA D0, loop
-
-        Megjegyzés:
-          A callback továbbra is single-word callback, tehát nem olvas
-          forrás-RAM-ból. A staging olvasás a főkódban történik, közvetlenül
-          az adott NMI trigger előtt.
+        Főkód blokkonként: MOVE.W (A3)+,D2 → NMI → MOVEP.W D2,0(A0) → ADDQ.L #4,A0 → DBRA D0,loop
+        A callback csak MOVEP.W + RTS — nem olvas forrás-RAM-ból.
         """
         if len(data) != CAL_RAM_SIZE:
             raise ValueError(f'Méret hiba: {len(data)} byte (kell: {CAL_RAM_SIZE})')
@@ -404,16 +427,9 @@ class HP3458A:
             if progress_cb and i % 64 == 0:
                 progress_cb(i, total_progress, f'Staging {i}/1024 szó')
 
-        # ── Fázis 2: pSOS-korrupt pozíciók javítása ──────────────────────────
-        # FONTOS (2026-06-16): itt KORÁBBAN a checksumokat is újraszámoltuk
-        # egy fix seed-es képlettel — ez FELESLEGES volt (a Fázis 1 staging
-        # ciklus már a `data`-ból helyesen írta ki őket), és VESZÉLYES, mert
-        # az a képlet csak 2 saját dumpra volt illesztve (lásd cs.txt,
-        # research/python/verify_checksum_hypothesis.py) — bármilyen más
-        # dumpnál ROSSZ checksumot írt volna a stagingbe, majd a valós
-        # cal_ram-ba. A `data` (a GUI codec által, a helyes flag_count-os
-        # modellel előállított) checksuma már helyesen ott van a staging
-        # területen a Fázis 1 után — nincs mit "javítani" rajta.
+        # ── Fázis 2: háttérfolyamat által felülírt staging pozíciók korrekciója ──
+        # A staging MWRITE alatt egy háttérfolyamat 3 pozíció HIGH byte-ját
+        # felülírja — ezeket a `data` tartalmából vissza kell állítani.
         if progress_cb:
             progress_cb(1024, total_progress, 'Korrupció javítás stagingben...')
         if stop_event and stop_event.is_set():
@@ -444,12 +460,8 @@ class HP3458A:
             # A magic wordöket közvetlenül minden JSR előtt frissítjük.
             self._set_magic_words()
 
-            # A DBRA visszaugró displacementjét NEM hardkódoljuk (ez okozta a
-            # korábbi 114,"CPU EXCEPTION -- 4" hibát: -32 helyett -30 kellett
-            # volna, így a CPU a LOOP előtti immediate adatszóba ugrott vissza
-            # és illegális utasításként dekódolta azt — 68000 vector 4).
-            # Helyette a LOOP címke és a DBRA szó indexéből számoljuk ki,
-            # hogy a kód bármilyen átszerkesztése esetén is helyes maradjon.
+            # A DBRA displacement értékét a tényleges opcode indexekből számítjuk —
+            # nem hardkódolva: cél = (DBRA_opcode_cím + 2) + displacement (68000 szabály).
             code = [
                 0x4E45,                                            # TRAP #5
                 0x267C, (a3 >> 16) & 0xFFFF, a3 & 0xFFFF,         # MOVEA.L #staging_start, A3
@@ -467,7 +479,8 @@ class HP3458A:
             # 68000 szabály: cél = (DBRA opcode címe + 2) + displacement
             # → displacement = LOOP címe - (DBRA opcode címe + 2)
             displacement = (loop_start_word * 2) - (dbra_word * 2 + 2)
-            assert -32768 <= displacement <= 32767, 'DBRA displacement túl nagy blokkhoz'
+            if not (-32768 <= displacement <= 32767):
+                raise ValueError(f'DBRA displacement túl nagy blokkhoz: {displacement}')
             code += [
                 0x51C8, displacement & 0xFFFF,                     # DBRA D0, loop
                 0x4E75,                                            # RTS
@@ -529,7 +542,7 @@ class HP3458A:
 
     # ── Cal_RAM DUMP ─────────────────────────────────────────────────────────
 
-    def dump_calram(self, progress_cb=None, stop_event=None) -> bytes:
+    def dump_calram(self, progress_cb=None, stop_event=None) -> bytes | None:
         """2048 byte MREAD-del olvas. Visszaadja a bytes-t vagy None (ha megszakadt)."""
         result = bytearray(CAL_RAM_SIZE)
         for i in range(CAL_RAM_SIZE):
@@ -548,12 +561,13 @@ class HP3458A:
     def verify_calram(self, expected: bytes,
                       progress_cb=None, stop_event=None) -> tuple:
         """Visszaolvassa a cal_ram-ot és összehasonlítja.
-        Visszatér: (ok: bool, diffs: [(offset, expected_byte, got_byte), ...])
+        Visszatér: (ok: bool | None, diffs: list)
+          ok=True: minden egyezik; ok=False: eltérés; ok=None: megszakítva
         """
         diffs = []
         for i in range(CAL_RAM_SIZE):
             if stop_event and stop_event.is_set():
-                return False, []
+                return None, []
             phys = CAL_RAM_BASE + i * 2
             got = self.mread_hi(phys)
             if got != expected[i]:
@@ -567,7 +581,7 @@ class HP3458A:
     # ── Settings_RAM DUMP ────────────────────────────────────────────────────
 
     def dump_settings(self, word_count: int = 16384,
-                      progress_cb=None, stop_event=None) -> bytes:
+                      progress_cb=None, stop_event=None) -> bytes | None:
         """Settings_ram dump. word_count: 16384=32KB, 32768=64KB (full, ~27 perc)."""
         result = bytearray(word_count * 2)
         for i in range(word_count):
@@ -583,12 +597,30 @@ class HP3458A:
             progress_cb(word_count, word_count, 'Kész')
         return bytes(result)
 
-    # ── CALSTR írás (beépített GPIB parancs) ────────────────────────────────
+    # ── CALSTR / SECURE / UNSECURE (beépített GPIB parancsok) ──────────────
 
     def write_calstr(self, text: str) -> str:
         """CALSTR 'szöveg' parancs küldése. Visszatér: ERRSTR? válasz."""
         safe = text[:80].replace('"', "'")
         self.send(f'CALSTR "{safe}"')
+        time.sleep(0.5)
+        return self.errstr()
+
+    def read_secure_code(self) -> int:
+        """Cal_SecureCode (u32 @ cal_ram 0x61E) live MREAD-del. 0 = unsecured."""
+        base = CAL_RAM_BASE + 0x61E * 2   # = 0x60C3C
+        b = [self.mread_hi(base + i * 2) for i in range(4)]
+        return (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]
+
+    def gpib_unsecure(self, old_code: str) -> str:
+        """SECURE old_code,0 → ERRSTR?. new_code=0 törli a biztonsági kódot."""
+        self.send(f'SECURE {old_code},0')
+        time.sleep(0.5)
+        return self.errstr()
+
+    def gpib_secure(self, new_code: str) -> str:
+        """SECURE 0,new_code,ON → ERRSTR?. Csak unsecured állapotból (old_code=0)."""
+        self.send(f'SECURE 0,{new_code},ON')
         time.sleep(0.5)
         return self.errstr()
 
@@ -609,11 +641,12 @@ class HP3458A:
         """
         regions = []
 
-        # Magic words + NMI pointer area
-        for addr, _ in MAGIC_WORDS:
+        # Magic words + NMI pointer area (verzió-specifikus címek)
+        for addr, _ in self._cfg.magic_words:
             regions.append(addr)
-        for addr in (CALLBACK_PTR_ADDR, CALLBACK_PTR_ADDR + 2,  # 32-bit pointer, 2 word
-                     SUCCESS_FLAG_ADDR, SAVED_SR_ADDR):
+        cb = self._cfg.callback_ptr_addr
+        for addr in (cb, cb + 2,                              # 32-bit callback pointer
+                     self._cfg.success_flag_addr, self._cfg.saved_sr_addr):
             regions.append(addr)
 
         # CB_BASE (7 word)

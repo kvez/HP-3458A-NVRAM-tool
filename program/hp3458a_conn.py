@@ -11,6 +11,7 @@ class ConnError(Exception):
 class BaseConn:
     def send(self, cmd: str): raise NotImplementedError
     def query(self, cmd: str, tmo: float = 5.0) -> str: raise NotImplementedError
+    def gpib_clear(self): raise NotImplementedError
     def close(self): pass
 
 
@@ -31,12 +32,12 @@ class TCPConn(BaseConn):
         self._s.sendall((cmd.rstrip('\n') + '\n').encode())
 
     def _readline(self, tmo: float = 5.0) -> str:
-        deadline = time.time() + tmo
+        deadline = time.monotonic() + tmo
         while b'\n' not in self._buf:
-            rem = max(0.1, deadline - time.time())
-            if rem <= 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError('Nincs válasz a műszertől')
-            self._s.settimeout(rem)
+            self._s.settimeout(remaining)
             chunk = self._s.recv(4096)
             if not chunk:
                 raise ConnError('A kapcsolat megszakadt')

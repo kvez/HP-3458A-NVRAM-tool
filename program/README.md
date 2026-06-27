@@ -28,7 +28,7 @@ dist\hp3458a_nvram_tool.exe
 python hp3458a_gui.py
 ```
 
-**Követelmények:** Python 3.8+, tkinter (beépített). NI-488.2 módhoz: NI-VISA vagy NI-488.2 DLL telepítve.
+**Követelmények:** Python 3.10+, tkinter (beépített). NI-488.2 módhoz: NI-VISA vagy NI-488.2 DLL telepítve.
 
 ## Tipikus használat
 

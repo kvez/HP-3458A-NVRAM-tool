@@ -3,7 +3,6 @@
 Futtatás: python hp3458a_gui.py
 """
 import hashlib
-import os
 import sys
 import threading
 import time
@@ -12,7 +11,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
-from hp3458a_conn   import TCPConn, NIConn, ConnError
+from hp3458a_conn   import TCPConn, NIConn
 from hp3458a_instr  import HP3458A
 from hp3458a_calram import CalRAMCodec, CAL_RAM_SIZE
 
@@ -35,7 +34,7 @@ LOGO_PATH = _BUNDLE_DIR / 'psnd_ikon.png' if getattr(sys, 'frozen', False) else 
 
 # ── i18n ────────────────────────────────────────────────────────────────────
 
-VERSION = 'V0.9 Beta'
+VERSION = 'V0.9.1 Beta'
 
 _S = {
 'app_title':      {'hu': 'HP 3458A NVRAM Programozó',    'en': 'HP 3458A NVRAM Tool',
@@ -92,6 +91,17 @@ _S = {
                    'de': 'CALSTR (max. 80 Zeichen):'},
 'btn_write_cstr': {'hu': 'CALSTR írása műszerre',        'en': 'Write CALSTR to meter',
                    'de': 'CALSTR auf Gerät schreiben'},
+# Secure frame
+'lbl_secure_frame': {'hu': 'Kalibrálás biztonsági kód (SECURE/UNSECURE)',
+                     'en': 'Calibration Security Code (SECURE/UNSECURE)',
+                     'de': 'Kalibrierungssicherheitscode (SECURE/UNSECURE)'},
+'lbl_secure_code':  {'hu': 'Biztonsági kód:',   'en': 'Security code:',   'de': 'Sicherheitscode:'},
+'btn_check_secure': {'hu': 'Állapot lekérdezés', 'en': 'Query state',     'de': 'Status abfragen'},
+'btn_unsecure':     {'hu': 'Unsecure',           'en': 'Unsecure',        'de': 'Entsperren'},
+'btn_secure':       {'hu': 'Secure',             'en': 'Secure',          'de': 'Sperren'},
+'sec_unknown':      {'hu': '○ Ismeretlen',       'en': '○ Unknown',       'de': '○ Unbekannt'},
+'sec_unsecured':    {'hu': '● Unsecured (nyitott)', 'en': '● Unsecured (open)', 'de': '● Entsperrt (offen)'},
+'sec_secured':      {'hu': '● Secured (zárolva)', 'en': '● Secured (locked)', 'de': '● Gesperrt'},
 'btn_report_gen': {'hu': 'Riport generálás',             'en': 'Generate Report',    'de': 'Bericht erstellen'},
 'btn_report_save':{'hu': 'Mentés .txt',                  'en': 'Save .txt',          'de': '.txt speichern'},
 # Log
@@ -108,6 +118,12 @@ _S = {
 'lbl_old':        {'hu': 'Régi érték:',                  'en': 'Old value:',         'de': 'Alter Wert:'},
 'lbl_new':        {'hu': 'Új érték:',                    'en': 'New value:',         'de': 'Neuer Wert:'},
 'lbl_type_hint':  {'hu': 'Típus',                        'en': 'Type',               'de': 'Typ'},
+'lbl_fw_limits':  {'hu': 'Limit: [{lo} .. {hi}]',
+                   'en': 'Limit: [{lo} .. {hi}]',
+                   'de': 'Grenze: [{lo} .. {hi}]'},
+'warn_out_of_range': {'hu': 'Figyelem: határon kívül! [{lo} .. {hi}]',
+                      'en': 'Warning: out of range! [{lo} .. {hi}]',
+                      'de': 'Achtung: außerhalb! [{lo} .. {hi}]'},
 # Progress
 'prog_dump':      {'hu': 'Cal_RAM letöltés...',          'en': 'Downloading Cal_RAM...',
                    'de': 'Cal_RAM wird herunterladen...'},
@@ -238,7 +254,7 @@ class SafetyWarningDialog(tk.Toplevel):
         ttk.Button(frame, text=btn_text, command=self._close).grid(
             row=1, column=0, columnspan=2, pady=(10, 0))
 
-        self.protocol('WM_DELETE_WINDOW', self._close)
+        self.protocol('WM_DELETE_WINDOW', lambda: None)
         self.update_idletasks()
         self._center_on(parent)
         self.wait_window(self)
@@ -345,8 +361,14 @@ class EditDialog(tk.Toplevel):
         entry.focus_set()
         entry.bind('<Return>', lambda e: self._ok())
 
+        lo, hi = codec.get_field_limits(name)
+        if lo is not None:
+            ttk.Label(self, text=t('lbl_fw_limits').format(lo=lo, hi=hi),
+                      foreground='gray').pack(padx=16, pady=(2, 0), anchor='w')
+
         self._err_lbl = ttk.Label(self, text='', foreground='red', wraplength=380)
         self._err_lbl.pack(padx=16, pady=2)
+        self._var.trace_add('write', self._on_val_change)
 
         bf = ttk.Frame(self)
         bf.pack(pady=(4, 12))
@@ -355,11 +377,30 @@ class EditDialog(tk.Toplevel):
         self.transient(parent)
         self.update()
 
+    def _on_val_change(self, *_):
+        val = self._var.get().strip()
+        lo, hi = self._codec.get_field_limits(self._field['name'])
+        if lo is None or hi is None or not val:
+            self._err_lbl.config(text='', foreground='red')
+            return
+        try:
+            fval = float(val)
+        except ValueError:
+            self._err_lbl.config(text='', foreground='red')
+            return
+        if not (lo <= fval <= hi):
+            self._err_lbl.config(
+                text=t('warn_out_of_range').format(lo=lo, hi=hi),
+                foreground='orange',
+            )
+        else:
+            self._err_lbl.config(text='', foreground='red')
+
     def _ok(self):
         val = self._var.get().strip()
         err = self._codec.validate_field_str(self._field['name'], val)
         if err:
-            self._err_lbl.config(text=err)
+            self._err_lbl.config(text=err, foreground='red')
             return
         self._codec.set_field_str(self._field['name'], val)
         self._on_save(self._field['name'])
@@ -417,7 +458,9 @@ class App(tk.Tk):
         self._conn    = None   # BaseConn
         self._instr   = None   # HP3458A
         self._codec   = None   # CalRAMCodec
+        self._nmi_ok  = False  # sikeres NMI teszt után True; lecsatlakozáskor reset
         self._set_data = None  # bytes (settings dump)
+        self._secure_state: str = 'unknown'  # 'unknown' | 'unsecured' | 'secured'
         self._i18n_w  = []    # [(widget, attr, key)] for language refresh
         self._stop_ev = threading.Event()
         self._writing = False
@@ -659,6 +702,32 @@ class App(tk.Tk):
         tab = ttk.Frame(nb, padding=8)
         nb.add(tab, text=t('tab_report'))
 
+        # ── Biztonsági kód kezelő ──────────────────────────────────────────
+        sec_f = ttk.LabelFrame(tab, text=t('lbl_secure_frame'), padding=6)
+        sec_f.pack(fill='x', pady=(0, 6))
+
+        row1 = ttk.Frame(sec_f)
+        row1.pack(fill='x')
+        ttk.Label(row1, text=t('lbl_secure_code')).pack(side='left')
+        self._secure_code_var = tk.StringVar(value='0')
+        ttk.Entry(row1, textvariable=self._secure_code_var, width=20).pack(side='left', padx=4)
+        ttk.Label(row1, text='(gyári alap: HP3458A)', foreground='gray').pack(side='left', padx=(0, 12))
+        self._sec_status_lbl = ttk.Label(row1, text=t('sec_unknown'), foreground='gray', width=28)
+        self._sec_status_lbl.pack(side='left', padx=(8, 4))
+        self._check_sec_btn = ttk.Button(row1, text=t('btn_check_secure'),
+                                         command=self._check_secure_state, state='disabled')
+        self._check_sec_btn.pack(side='left', padx=4)
+
+        row2 = ttk.Frame(sec_f)
+        row2.pack(fill='x', pady=(4, 0))
+        self._unsecure_btn = ttk.Button(row2, text=t('btn_unsecure'),
+                                        command=self._do_unsecure, state='disabled')
+        self._unsecure_btn.pack(side='left', padx=(0, 4))
+        self._secure_btn = ttk.Button(row2, text=t('btn_secure'),
+                                      command=self._do_secure, state='disabled')
+        self._secure_btn.pack(side='left', padx=4)
+
+        # ── CALSTR ────────────────────────────────────────────────────────
         cs_f = ttk.LabelFrame(tab, text=t('lbl_calstr'), padding=6)
         cs_f.pack(fill='x', pady=(0, 8))
         self._calstr_var = tk.StringVar()
@@ -710,37 +779,63 @@ class App(tk.Tk):
         self._btn_disc.config(state=state_inst)
         self._btn_testid.config(state=state_inst)
         self._btn_clrbuf.config(state=state_inst)
-        for btn in (self._dump_btn, self._wcstr_btn,
-                    self._sdump32_btn, self._sdump64_btn):
+        for btn in (self._dump_btn, self._sdump32_btn, self._sdump64_btn, self._cleanup_btn):
             btn.config(state=state_inst)
-        # upload/verify/cleanup csak ha adat is van betöltve
+        # verify: adat + kapcsolat; írás (upload/words/chunked): adat + kapcsolat + NMI teszt
         if ok and self._codec is not None:
-            self._upload_btn.config(state='normal')
             self._verify_btn.config(state='normal')
-            self._cleanup_btn.config(state='normal')
-            self._words_btn.config(state='normal')
-            self._chunked_btn.config(state='normal')
+            if self._nmi_ok:
+                self._upload_btn.config(state='normal')
+                self._words_btn.config(state='normal')
+                self._chunked_btn.config(state='normal')
+            else:
+                self._upload_btn.config(state='disabled')
+                self._words_btn.config(state='disabled')
+                self._chunked_btn.config(state='disabled')
         elif not ok:
-            self._cleanup_btn.config(state='disabled')
+            self._nmi_ok = False
+            self._secure_state = 'unknown'
+            self._upload_btn.config(state='disabled')
+            self._verify_btn.config(state='disabled')
             self._words_btn.config(state='disabled')
             self._chunked_btn.config(state='disabled')
         self._nmi_test_btn.config(state=state_inst)
         self._rescue_btn.config(state=state_inst)
+        self._check_sec_btn.config(state=state_inst)
         self._status_lbl.config(
             text=t('status_ok') if ok else t('status_none'),
             foreground='green' if ok else 'gray',
         )
+        self._update_secure_ui()
 
-    def _run_bg(self, fn, *args, done=None, err=None):
-        """Háttérszálban futtat fn(*args), kész→done(result), hiba→err(str)."""
-        def wrapper():
-            try:
-                result = fn(*args)
-                if done: self.after(0, lambda: done(result))
-            except Exception as exc:
-                if err: self.after(0, lambda: err(str(exc)))
-                else:   self.after(0, lambda: self._log(f'Hiba: {exc}'))
-        threading.Thread(target=wrapper, daemon=True).start()
+    def _on_codec_loaded(self):
+        """Codec betöltése után: codec-függő gombok engedélyezése + kapcsolat állapot frissítése."""
+        for btn in (self._saveb_btn, self._savet_btn, self._csum_btn, self._edit_btn):
+            btn.config(state='normal')
+        self._set_connected(self._instr is not None)
+        if self._codec is not None:
+            code = self._codec.get_field_value('Cal_SecureCode') or 0
+            self._secure_state = 'unsecured' if code == 0 else 'secured'
+            self._update_secure_ui()
+
+    def _update_secure_ui(self):
+        """Secure állapot gombjainak és státuszcímkéjének frissítése."""
+        connected = self._instr is not None
+        state = self._secure_state
+        # státuszcímke
+        if state == 'unsecured':
+            self._sec_status_lbl.config(text=t('sec_unsecured'), foreground='green')
+        elif state == 'secured':
+            self._sec_status_lbl.config(text=t('sec_secured'), foreground='orange')
+        else:
+            self._sec_status_lbl.config(text=t('sec_unknown'), foreground='gray')
+        # Unsecure: connected + (secured VAGY unknown)
+        can_unsecure = connected and state in ('secured', 'unknown')
+        self._unsecure_btn.config(state='normal' if can_unsecure else 'disabled')
+        # Secure + CALSTR: csak ha unsecured
+        can_write = connected and state == 'unsecured'
+        self._secure_btn.config(state='normal' if can_write else 'disabled')
+        self._wcstr_btn.config(state='normal' if can_write else 'disabled')
 
     def _save_prefs_now(self):
         self._prefs.update({
@@ -801,7 +896,7 @@ class App(tk.Tk):
             self._log('Kapcsolódás... init folyamatban')
             self._instr.init()
             self._set_connected(True)
-            self._log(f'Kapcsolódva ({self._conn_type.get().upper()}) · GPIB {gpib}')
+            self._log(f'Kapcsolódva ({self._conn_type.get().upper()}) · GPIB {gpib} · Firmware REV{self._instr.fw_rev}')
             try:
                 iid = self._instr.test_id()
                 self._log(f'Műszer ID: {iid}')
@@ -901,30 +996,36 @@ class App(tk.Tk):
         results = []
 
         def do_passes():
-            for p in range(passes):
-                if stop.is_set():
-                    break
-                self.after(0, lambda p=p: self._log(f'Dump menet {p+1}/{passes}...'))
+            try:
+                for p in range(passes):
+                    if stop.is_set():
+                        break
+                    self.after(0, lambda p=p: self._log(f'Dump menet {p+1}/{passes}...'))
 
-                def pcb(cur, total, msg, p=p):
-                    # Cancellation propagation: ha a gomb meg lett nyomva, stop beállít
-                    if dlg.is_cancelled():
-                        stop.set()
-                    self.after(0, lambda: dlg.update_progress(
-                        cur, total, f'Pass {p+1}/{passes}: {msg}'))
+                    def pcb(cur, total, msg, p=p):
+                        if dlg.is_cancelled():
+                            stop.set()
+                        self.after(0, lambda: dlg.update_progress(
+                            cur, total, f'Pass {p+1}/{passes}: {msg}'))
 
-                data = self._instr.dump_calram(progress_cb=pcb, stop_event=stop)
-                if data is None or stop.is_set():
-                    break
-                md5 = hashlib.md5(data).hexdigest()
-                results.append((data, md5))
-                self.after(0, lambda m=md5, pp=p+1: self._log(f'Pass {pp} MD5: {m}'))
+                    data = self._instr.dump_calram(progress_cb=pcb, stop_event=stop)
+                    if data is None or stop.is_set():
+                        break
+                    md5 = hashlib.md5(data).hexdigest()
+                    results.append((data, md5))
+                    self.after(0, lambda m=md5, pp=p+1: self._log(f'Pass {pp} MD5: {m}'))
 
-            if results and not stop.is_set():
-                self.after(0, lambda: self._on_dump_done(results, dlg))
-            else:
-                self.after(0, dlg.close)
-                self.after(0, lambda: self._log('Dump megszakítva'))
+                if results and not stop.is_set():
+                    self.after(0, lambda: self._on_dump_done(results, dlg))
+                else:
+                    self.after(0, dlg.close)
+                    self.after(0, lambda: self._log('Dump megszakítva'))
+            except Exception as exc:
+                self.after(0, lambda e=str(exc): (
+                    dlg.close(),
+                    self._log(f'Dump HIBA: {e}'),
+                    messagebox.showerror('Dump hiba', e)
+                ))
 
         threading.Thread(target=do_passes, daemon=True).start()
 
@@ -937,8 +1038,15 @@ class App(tk.Tk):
         all_match = len(set(md5s)) == 1
         if not all_match:
             self._log(f'FIGYELEM: Dump menetek NEM egyeznek! MD5-ök: {md5s}')
-            messagebox.showwarning('Dump eltérés',
-                                   'A dump menetek eltérnek! Az utolsó menet adatai kerülnek betöltésre.')
+            if not messagebox.askyesno(
+                    'Dump eltérés',
+                    'A dump menetek eltérnek — az adatstabilitás nem igazolt!\n\n'
+                    f'MD5-ök: {md5s}\n\n'
+                    'Ajánlott: Nem → csinálj új dumpot.\n\n'
+                    'Betöltöd az utolsó passzt az eltéréssel együtt?'):
+                self._log('Dump eltérés: felhasználó elutasította a betöltést.')
+                return
+            self._log('Dump eltérés: felhasználó megerősítette a betöltést (eltérő passzok).')
         else:
             self._log(f'Dump OK: {len(results)} menet egyezik · MD5: {md5s[0]}')
 
@@ -953,12 +1061,7 @@ class App(tk.Tk):
         self._refresh_tree()
         calstr = self._codec.get_field_value('Calstr')
         if calstr: self._calstr_var.set(str(calstr))
-        for btn in (self._saveb_btn, self._savet_btn, self._csum_btn, self._edit_btn,
-                    self._upload_btn, self._verify_btn):
-            btn.config(state='normal')
-        if self._instr:
-            self._words_btn.config(state='normal')
-            self._chunked_btn.config(state='normal')
+        self._on_codec_loaded()
 
     # ── Cal_RAM Betöltés / Mentés ─────────────────────────────────────────────
 
@@ -975,12 +1078,7 @@ class App(tk.Tk):
             self._refresh_tree()
             calstr = self._codec.get_field_value('Calstr')
             if calstr: self._calstr_var.set(str(calstr))
-            for btn in (self._saveb_btn, self._savet_btn, self._csum_btn, self._edit_btn,
-                        self._upload_btn, self._verify_btn):
-                btn.config(state='normal')
-            if self._instr:
-                self._words_btn.config(state='normal')
-                self._chunked_btn.config(state='normal')
+            self._on_codec_loaded()
         except Exception as exc:
             messagebox.showerror('Hiba', str(exc))
 
@@ -1051,6 +1149,8 @@ class App(tk.Tk):
             last_msg = ['']
             def pcb(cur, total, msg):
                 last_msg[0] = msg
+                if dlg.is_cancelled():
+                    stop.set()
                 self.after(0, lambda c=cur, t=total, m=msg: dlg.update_progress(c, t, m))
             data = self._codec.to_bytes()
             try:
@@ -1068,12 +1168,14 @@ class App(tk.Tk):
 
     def _on_upload_done(self, ok: bool, data: bytes, dlg: ProgressDialog, detail: str = ''):
         self._writing = False
+        cancelled = dlg.is_cancelled()
         dlg.close()
         if ok:
             self._log('Feltöltés sikeres. Verify indul 3s múlva...')
-            self._codec.reset_original()
             self._refresh_tree()
             self._start_verify(data, auto_cleanup=True, pre_delay=3.0)
+        elif cancelled:
+            self._log('Feltöltés megszakítva.')
         else:
             self._log('Feltöltés HIBA! ' + detail)
             messagebox.showerror('Feltöltés', f'Feltöltési hiba!\n\n{detail}')
@@ -1084,8 +1186,7 @@ class App(tk.Tk):
         """Visszaírja az első cal_ram word-öt (adatot nem változtat), NMI tesztelése."""
         if not self._instr:
             return
-        dlg  = ProgressDialog(self, 'NMI Mechanizmus Teszt', 3)
-        stop = threading.Event()
+        dlg = ProgressDialog(self, 'NMI Mechanizmus Teszt', 3)
 
         def do_test():
             def pcb(cur, total, msg):
@@ -1095,17 +1196,21 @@ class App(tk.Tk):
             except Exception as exc:
                 import traceback
                 detail = str(exc) + '\n' + traceback.format_exc()
-                self.after(0, lambda d=detail: (
-                    dlg.close(),
-                    self._log('NMI Teszt HIBA: ' + d),
+                def _on_nmi_exc(d):
+                    dlg.close()
+                    self._log('NMI Teszt HIBA: ' + d)
+                    self._nmi_ok = False
+                    self._set_connected(self._instr is not None)
                     messagebox.showerror('NMI Teszt', d[:400])
-                ))
+                self.after(0, lambda d=detail: _on_nmi_exc(d))
                 return
-            self.after(0, lambda o=ok, d=detail: (
-                dlg.close(),
-                self._log(f'NMI Teszt: {"OK ✓" if o else "HIBA ✗"} — {d}'),
+            def _on_nmi_done(o, d):
+                dlg.close()
+                self._log(f'NMI Teszt: {"OK ✓" if o else "HIBA ✗"} — {d}')
+                self._nmi_ok = bool(o)
+                self._set_connected(self._instr is not None)
                 messagebox.showinfo('NMI Teszt', f'{"OK ✓" if o else "HIBA ✗"}\n\n{d}')
-            ))
+            self.after(0, lambda o=ok, d=detail: _on_nmi_done(o, d))
 
         threading.Thread(target=do_test, daemon=True).start()
 
@@ -1128,8 +1233,7 @@ class App(tk.Tk):
             return
         try:
             self._instr.send('DEFKEY F1,"END ALWAYS;PRESET NORM"')
-            import time as _time
-            _time.sleep(0.4)
+            time.sleep(0.4)
             resp = self._instr.errstr()
             if 'NO ERROR' in resp:
                 self._log('Rescue DEFKEY: F1 = "END ALWAYS;PRESET NORM" sikeresen telepítve ✓')
@@ -1163,6 +1267,7 @@ class App(tk.Tk):
             if ans:
                 self._codec.recalculate_checksums()
                 self._refresh_tree()
+                changed = self._codec.find_changed_words()
         word_list = [(phys, word) for _, phys, word in changed]
         if not messagebox.askyesno('Módosított szavak',
                                    f'{len(word_list)} módosított word írása egyenként NMI-vel.\n'
@@ -1186,11 +1291,7 @@ class App(tk.Tk):
             except Exception as exc:
                 import traceback
                 detail = str(exc) + '\n' + traceback.format_exc()
-                self.after(0, lambda d=detail: (
-                    dlg.close(),
-                    self._log('Módosított írás HIBA: ' + d),
-                    messagebox.showerror('Szóírás', d[:400])
-                ))
+                self.after(0, lambda d=detail: self._on_upload_done(False, data, dlg, d[:400]))
                 return
             self.after(0, lambda: self._on_upload_done(ok, data, dlg, last_msg[0]))
 
@@ -1198,21 +1299,14 @@ class App(tk.Tk):
         self._writing = True
         threading.Thread(target=do_words, daemon=True).start()
 
-    # ── JSR Újrapróbálás (meglevő DATA_BASE tartalommal) ─────────────────────
-
     # ── Szavankénti feltöltés, egyenkénti NMI (BIZTOS, de ~1 óra) ─────────────
 
     def _do_upload_chunked(self):
-        """Teljes cal_ram feltöltés egyenként, 1 szó/NMI (write_calram_words_list).
+        """Teljes cal_ram feltöltés egyenként, 1 szó/NMI módban (write_calram_bin_safe).
 
-        A korábbi "csoportos"/"10k unrolled" megközelítés (write_calram_bin_chunked,
-        a régi _write_loop_callback streaming mintával) ki van véve — az
-        dokumentáltan instabil (RAM-olvasás a /WE ablak alatt, lásd
-        feedback-bulk-callback-unsafe memória). Helyette ugyanaz a biztos,
-        szóról szóra haladó mechanizmus fut, mint a "Módosított szavak"
-        gombnál, csak a TELJES 1024 szóra, nem csak a változottakra.
-
-        ~2-3s/szó × 1024 szó ≈ 35-50 perc — biztonsági ráhagyással ~1 óra.
+        Az összes 1024 szót egyenként írja, a checksum szavakat a normál adatok
+        után — ezzel elkerülhető a részleges adat melletti érvényes checksum helyzet.
+        Becsült idő: ~35–50 perc (biztonsági ráhagyással ~1 óra).
         """
         if not self._codec or not self._instr:
             return
@@ -1241,11 +1335,9 @@ class App(tk.Tk):
             last_msg = ['']
             def pcb(cur, total, msg):
                 last_msg[0] = msg
-                if dlg.winfo_exists() and dlg.is_cancelled():
+                if dlg.is_cancelled():
                     stop.set()
-                if dlg.winfo_exists():
-                    self.after(0, lambda c=cur, t=total, m=msg:
-                               dlg.update_progress(c, t, m) if dlg.winfo_exists() else None)
+                self.after(0, lambda c=cur, t=total, m=msg: dlg.update_progress(c, t, m))
             try:
                 # write_calram_bin_safe: ugyanaz a mechanizmus, mint
                 # write_calram_words_list, de a checksum szavakat a
@@ -1255,11 +1347,7 @@ class App(tk.Tk):
             except Exception as exc:
                 import traceback
                 detail = str(exc) + '\n' + traceback.format_exc()
-                self.after(0, lambda d=detail: (
-                    dlg.close(),
-                    self._log('Teljes lassú felt. HIBA: ' + d),
-                    messagebox.showerror('Teljes lassú felt.', d[:400])
-                ))
+                self.after(0, lambda d=detail: self._on_upload_done(False, data, dlg, d[:400]))
                 return
             self.after(0, lambda: self._on_upload_done(ok, data, dlg, last_msg[0]))
 
@@ -1284,7 +1372,12 @@ class App(tk.Tk):
 
         def do_verify():
             if pre_delay > 0:
-                time.sleep(pre_delay)
+                deadline = time.monotonic() + pre_delay
+                while time.monotonic() < deadline:
+                    if dlg.is_cancelled():
+                        self.after(0, dlg.close)
+                        return
+                    time.sleep(0.1)
             def pcb(cur, total, msg):
                 if dlg.is_cancelled(): stop.set()
                 self.after(0, lambda c=cur, t=total, m=msg: dlg.update_progress(c, t, m))
@@ -1304,11 +1397,16 @@ class App(tk.Tk):
 
         threading.Thread(target=do_verify, daemon=True).start()
 
-    def _on_verify_done(self, ok: bool, diffs: list, dlg: ProgressDialog,
+    def _on_verify_done(self, ok, diffs: list, dlg: ProgressDialog,
                         auto_cleanup: bool = False):
         dlg.close()
+        if ok is None:
+            self._log('Verify megszakítva.')
+            return
         if ok:
             self._log('Verify: OK ✓ — minden byte egyezik')
+            if self._codec is not None:
+                self._codec.reset_original()
             if auto_cleanup and self._autoclean_var.get():
                 self._log('Auto-cleanup: settings_RAM törlés indul...')
                 self._do_cleanup()
@@ -1336,9 +1434,16 @@ class App(tk.Tk):
             def pcb(cur, total, msg):
                 if dlg.is_cancelled(): stop.set()
                 self.after(0, lambda: dlg.update_progress(cur, total, msg))
-            n = self._instr.cleanup_injected(
-                include_data=True, progress_cb=pcb, stop_event=stop)
-            self.after(0, lambda: self._on_cleanup_done(n, dlg))
+            try:
+                n = self._instr.cleanup_injected(
+                    include_data=True, progress_cb=pcb, stop_event=stop)
+                self.after(0, lambda: self._on_cleanup_done(n, dlg))
+            except Exception as exc:
+                self.after(0, lambda e=str(exc): (
+                    dlg.close(),
+                    self._log(f'Cleanup HIBA: {e}'),
+                    messagebox.showerror('Cleanup', e)
+                ))
 
         threading.Thread(target=do_clean, daemon=True).start()
 
@@ -1356,9 +1461,17 @@ class App(tk.Tk):
 
         def do_dump():
             def pcb(cur, total, msg):
+                if dlg.is_cancelled(): stop.set()
                 self.after(0, lambda: dlg.update_progress(cur, total, msg))
-            data = self._instr.dump_settings(word_count, progress_cb=pcb, stop_event=stop)
-            self.after(0, lambda: self._on_settings_done(data, dlg))
+            try:
+                data = self._instr.dump_settings(word_count, progress_cb=pcb, stop_event=stop)
+                self.after(0, lambda: self._on_settings_done(data, dlg))
+            except Exception as exc:
+                self.after(0, lambda e=str(exc): (
+                    dlg.close(),
+                    self._log(f'Settings dump HIBA: {e}'),
+                    messagebox.showerror('Settings dump', e)
+                ))
 
         threading.Thread(target=do_dump, daemon=True).start()
 
@@ -1396,19 +1509,28 @@ class App(tk.Tk):
         lines.append(f'[0x120DAE] Utolsó mérés: {rd_ascii(0x0DAE, 24)}')
         lines.append(f'[0x120E38] RMEM 1: {rd_ascii(0x0E38, 24)}')
 
-        # Magic words
+        # Magic words — verzió-specifikus, self._instr._cfg alapján
+        cfg = self._instr._cfg if self._instr else None
         lines.append('\nMagic word-ök (NMI biztonsági ellenőrzés):')
-        for addr, name in [(0x1780, 'magic1 DEAF'), (0x0C90, 'magic2 BAD1'),
-                           (0x1782, 'magic3 0ACE'), (0x0C92, 'magic4 BEAD')]:
-            if addr + 1 < len(data):
-                lines.append(f'  [0x{base+addr:06X}] {name}: 0x{rd16(addr):04X}')
+        if cfg:
+            for abs_addr, expected_val in cfg.magic_words:
+                off = abs_addr - base
+                if 0 <= off + 1 < len(data):
+                    lines.append(f'  [0x{abs_addr:06X}] 0x{rd16(off):04X}  (várt: 0x{expected_val:04X})')
 
-        # Callback, success flag, /WE close
+        # Callback, success flag, /WE close — verzió-specifikus
         lines.append('\nNMI callback terület:')
-        for addr, name in [(0x1852, 'callback ptr HI'), (0x1854, 'callback ptr LO'),
-                           (0x1856, 'success flag'), (0x185A, '/WE close val')]:
-            if addr + 1 < len(data):
-                lines.append(f'  [0x{base+addr:06X}] {name}: 0x{rd16(addr):04X}')
+        if cfg:
+            cb = cfg.callback_ptr_addr
+            for abs_addr, name in [
+                (cb,     'callback ptr HI'),
+                (cb + 2, 'callback ptr LO'),
+                (cb + 4, 'success flag'),
+                (cb + 8, '/WE close val'),
+            ]:
+                off = abs_addr - base
+                if 0 <= off + 1 < len(data):
+                    lines.append(f'  [0x{abs_addr:06X}] {name}: 0x{rd16(off):04X}')
 
         # DEFKEY F0-F9
         lines.append('\nDEFKEY F0-F9:')
@@ -1430,7 +1552,86 @@ class App(tk.Tk):
             Path(path).write_bytes(self._set_data)
             self._log(f'Settings .bin mentve: {path}')
 
-    # ── Cal Report + CALSTR ───────────────────────────────────────────────────
+    # ── Cal Report + CALSTR + SECURE ─────────────────────────────────────────
+
+    def _check_secure_state(self):
+        """Live MREAD-del lekérdezi a Cal_SecureCode-ot és frissíti az állapotot."""
+        if not self._instr:
+            return
+        def worker():
+            try:
+                code = self._instr.read_secure_code()
+                state = 'unsecured' if code == 0 else 'secured'
+                self._log(f'Secure lekérdezés: Cal_SecureCode=0x{code:08X} → {state}')
+                def done():
+                    self._secure_state = state
+                    self._update_secure_ui()
+                self.after(0, done)
+            except Exception as exc:
+                msg = str(exc)
+                self.after(0, lambda m=msg: self._log(f'Secure lekérdezés hiba: {m}'))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_unsecure(self):
+        """SECURE old_code,0 küldése — kód törlése."""
+        if not self._instr:
+            return
+        code = self._secure_code_var.get().strip() or '0'
+        def worker():
+            try:
+                resp = self._instr.gpib_unsecure(code)
+                ok = 'NO ERROR' in resp
+                def done(r=resp, o=ok):
+                    self._log(f'SECURE {code},0 → {r}')
+                    if o:
+                        self._secure_state = 'unsecured'
+                        self._update_secure_ui()
+                    else:
+                        messagebox.showerror('Unsecure hiba', r)
+                self.after(0, done)
+            except Exception as exc:
+                msg = str(exc)
+                self.after(0, lambda m=msg: (
+                    self._log(f'Unsecure hiba: {m}'),
+                    messagebox.showerror('Unsecure', m)
+                ))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_secure(self):
+        """SECURE 0,new_code,ON küldése — kód beállítása (unsecured állapotból)."""
+        if not self._instr:
+            return
+        code = self._secure_code_var.get().strip()
+        try:
+            if not code or int(code) == 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror('SECURE', '0 nem érvényes biztonsági kód.\n\nAdj meg egy nem nulla egész számot.')
+            return
+        if not messagebox.askyesno('SECURE',
+                f'Kalibrálást zárolod a következő kóddal:\n\n  {code}\n\n'
+                'Jegyezd fel a kódot – elvesztése esetén nem tudsz CALSTR-t vagy CAL-t írni!\n\n'
+                'Folytatod?'):
+            return
+        def worker():
+            try:
+                resp = self._instr.gpib_secure(code)
+                ok = 'NO ERROR' in resp
+                def done(r=resp, o=ok):
+                    self._log(f'SECURE 0,{code},ON → {r}')
+                    if o:
+                        self._secure_state = 'secured'
+                        self._update_secure_ui()
+                    else:
+                        messagebox.showerror('SECURE hiba', r)
+                self.after(0, done)
+            except Exception as exc:
+                msg = str(exc)
+                self.after(0, lambda m=msg: (
+                    self._log(f'SECURE hiba: {m}'),
+                    messagebox.showerror('SECURE', m)
+                ))
+        threading.Thread(target=worker, daemon=True).start()
 
     def _write_calstr(self):
         if not self._instr: return
@@ -1439,7 +1640,15 @@ class App(tk.Tk):
         resp = self._instr.write_calstr(txt)
         self._log(f'CALSTR írás → {resp}')
         if 'NO ERROR' in resp:
-            messagebox.showinfo('CALSTR', 'CALSTR sikeresen írva a műszerre.')
+            self._codec = None
+            self._refresh_tree()
+            for btn in (self._upload_btn, self._words_btn, self._chunked_btn,
+                        self._verify_btn, self._edit_btn, self._csum_btn,
+                        self._saveb_btn, self._savet_btn):
+                btn.config(state='disabled')
+            self._log('CALSTR írva — a lokális codec elavult. Csinálj új dumpot!')
+            messagebox.showinfo('CALSTR', 'CALSTR sikeresen írva a műszerre.\n\n'
+                                'A lokális cal_RAM kép elavult — csinálj új dumpot!')
         else:
             messagebox.showerror('CALSTR hiba', resp)
 
