@@ -2,7 +2,7 @@
 
 **Read, decode, edit, and write the calibration RAM of the HP 3458A 8.5-digit precision multimeter via GPIB — including the factory-protected Cal_RAM area.**
 
-> Version: V0.9 Beta
+> Version: V0.9.1 Beta
 
 ---
 
@@ -40,7 +40,7 @@ cd program
 python hp3458a_gui.py
 ```
 
-Requirements: Python 3.8+, tkinter (built-in). For NI-488.2 direct mode: NI-VISA or NI-488.2 DLL must be installed.
+Requirements: Python 3.10+, tkinter (built-in). For NI-488.2 direct mode: NI-VISA or NI-488.2 DLL must be installed.
 
 ---
 
@@ -77,6 +77,8 @@ Go to the **Cal_RAM** tab and click **Dump**. The tool performs 3 read passes an
 Double-click any field in the list to edit its value. Fields are decoded as IEEE 754 double-precision floats (or integers where applicable). The tool shows the raw hex alongside the decoded value.
 
 ### 4. Upload to instrument
+
+**Before any upload, an NMI write test is mandatory.** Click **NMI Test** to verify that the injection mechanism works correctly on your instrument. Upload buttons are only enabled after a successful NMI test. Do not skip this step — a failed NMI mechanism would silently write incorrect data to Cal_RAM.
 
 Three upload modes are available:
 

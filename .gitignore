@@ -24,6 +24,9 @@ dumps/
 research/
 external_sources/
 
+# Tervezési és kutatási anyagok (nem publikus)
+docs/
+
 # Windows
 Thumbs.db
 desktop.ini
